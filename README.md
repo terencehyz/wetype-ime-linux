@@ -13,6 +13,8 @@
 - **原生 aarch64**：上游用 QEMU user 模式运行 ARM64 引擎；本 fork 去掉 QEMU 与交叉编译，直接在 aarch64 主机上构建、运行。因此**仅支持 aarch64**，不再提供 x86_64 AppImage。
 - **候选词翻页交互**：上游的 4×5 候选网格改为标准的一页 5 个横排分页。`←`/`→` 在页内移动、到两端自动翻页，`↑`/`↓`（以及 `-`/`=`、`PageUp`/`PageDown`）翻页，数字 `1`–`5` 直选；每个候选都是独立条目，鼠标点击可精确选中点中的词（上游网格里点任意列都只会选中当前高亮项）。
 
+已在 **统信 UOS / Deepin aarch64** 上实机验证可用（如 UOS 20，glibc 2.28），其他 aarch64 发行版理论上同理。
+
 引擎与词库仍来自腾讯官方 APK，本仓库不分发。
 
 ## 安装
@@ -43,7 +45,7 @@ sudo pacman -S --needed python patchelf unzip curl    # Arch
 
 APK 约 214 MB，只下载一次，缓存在 `~/.cache/wetype-ime`。用户学习数据在 `~/.local/share/wetype-ime`。
 
-Fcitx5 插件依赖 Fcitx5 ≥ 5.0.11（使用 `InputMethodEngineV2`）。若发行版仓库只有很旧的 Fcitx5，需要自行构建较新版本。
+Fcitx5 插件依赖 Fcitx5 ≥ 5.0.11（使用 `InputMethodEngineV2`）。若发行版仓库只有很旧的 Fcitx5，需要自行构建较新版本。UOS / Deepin 自带的是 2018 年的预览版，缺少 `InputMethodEngineV2`，需要自行构建（本项目在 Fcitx 5.1.11 上验证）。
 
 ## 从源码构建
 
