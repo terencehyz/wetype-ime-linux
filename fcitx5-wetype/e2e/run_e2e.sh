@@ -2,9 +2,13 @@
 # fcitx5-wetype 真机 e2e — 私有 dbus(前台) + 两阶段 profile
 T=$(mktemp -d /tmp/wetype-e2e.XXXXXX)
 trap 'rm -rf "$T"' EXIT
-BASE="$(cd "$(dirname "$0")/../.." && pwd)"
-ENGD="$BASE/squashfs-root/usr/lib/wetype-ime/arm64"
-if [ ! -d "$ENGD" ]; then echo "缺引擎目录: 先 bash scripts/e2_img.sh && ./WeTypeIME-Engine-x86_64.AppImage --appimage-extract"; exit 9; fi
+# 引擎目录：优先 $WETYPE_ENGINE_DIR，否则用原生 aarch64 安装目录
+ENGD="${WETYPE_ENGINE_DIR:-$HOME/.local/lib/wetype-ime/arm64}"
+[ -d "$ENGD" ] || ENGD="/usr/lib/wetype-ime/arm64"
+if [ ! -x "$ENGD/wetype-harness" ]; then
+  echo "缺引擎目录: 请先安装引擎（WeTypeIME-Engine-aarch64.AppImage install），或用 WETYPE_ENGINE_DIR 指定" >&2
+  exit 9
+fi
 MODE="${1:-test}"
 
 rm -rf "$T/config" "$T/data" "$T/bus"
@@ -17,7 +21,8 @@ BUS_PID=$(cat "$T/bus/pid")
 echo "BUS_ADDR=$BUS_ADDR"
 export DBUS_SESSION_BUS_ADDRESS="$BUS_ADDR"
 export XDG_CONFIG_HOME="$T/config" XDG_DATA_HOME="$T/data"
-export XDG_DATA_DIRS="/usr/local/share:/usr/share"
+# 用户级安装的插件放在 ~/.local/share/fcitx5，要能被隔离实例发现
+export XDG_DATA_DIRS="$HOME/.local/share:/usr/local/share:/usr/share"
 export WETYPE_ENGINE_DIR="$ENGD"
 unset FCITX_ADDON_DIRS
 
@@ -68,7 +73,9 @@ else
   python3 "$(dirname "$0")/dbus_wetype_test.py"; RC=$?
 fi
 
+# 关闭隔离实例；插件会随 fcitx5 退出而自行结束它的引擎。
+# 切勿用 pkill -f wetype-harness：那会误杀用户正在使用的引擎。
 kill $MY_FCITX 2>/dev/null
-pkill -f wetype-harness 2>/dev/null
+wait $MY_FCITX 2>/dev/null
 kill $BUS_PID 2>/dev/null
 exit $RC
