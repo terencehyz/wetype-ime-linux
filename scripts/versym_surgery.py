@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ELF surgery for WeType arm64 libs → glibc/qemu-aarch64.
+"""ELF surgery for WeType arm64 libs → glibc.
 
 glibc 2.39 dl-version.c 铁律（源码实测）：
 - l_versions 仅当 ndx_high>0（存在 VERNEED 或 VERDEF）才分配；

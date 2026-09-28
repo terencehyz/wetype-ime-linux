@@ -53,7 +53,7 @@ def run_case(name: str, sequence: str, batch_size: int, args, result_rows: list)
             "WETYPE_WORK_DIR": work_dir,
             "WETYPE_HARNESS_LOG": str(log_path),
         })
-        command = [args.qemu, "-L", args.sysroot, str(args.harness),
+        command = [str(args.harness),
                    str(args.engine_dir / "lib/libwxhld_jni.so"), "--daemon"]
         started = time.monotonic()
         with open(log_path, "w", encoding="utf-8") as stderr_file:
@@ -132,8 +132,6 @@ def main() -> int:
     parser.add_argument("--engine-dir", type=Path,
                         default=Path("/usr/lib/wetype-ime/arm64"))
     parser.add_argument("--harness", type=Path, default=None)
-    parser.add_argument("--qemu", default="qemu-aarch64-static")
-    parser.add_argument("--sysroot", default="/usr/aarch64-linux-gnu")
     parser.add_argument("--max-length", type=int, default=32)
     parser.add_argument("--batch-sizes", type=int, nargs="+", default=[1, 4],
                         help="characters sent per B request (addon normally caps batches at 4)")

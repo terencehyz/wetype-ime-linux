@@ -19,6 +19,15 @@
 char __sF[3 * 152];
 #define WSF_STRIDE 152
 
+/* glibc < 2.33 上，把引擎自有分配器产生的指针直接透传给 glibc free 会破坏堆
+   （触发 sysmalloc 断言）。这些版本默认改用登记表式 free：只释放本 shim 分配的指针，
+   其余跳过。glibc >= 2.33 保持基线透传。可用 WETYPE_REG_FREE=0/1 强制覆盖。 */
+#if defined(__GLIBC__) && (__GLIBC__ < 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ < 33))
+#  define WSF_REG_FREE_DEFAULT 1
+#else
+#  define WSF_REG_FREE_DEFAULT 0
+#endif
+
 static FILE *wsf_map(FILE *p) {
     unsigned long off = (unsigned long)p - (unsigned long)(void *)__sF;
     if (off < 3 * WSF_STRIDE) {
@@ -231,6 +240,7 @@ void __pthread_cleanup_pop(wpcu_t *c, int execute) {
 }
 
 /* ---- NDK AAsset 家族：磁盘文件后端。引擎读词库用 openFileDescriptor 拿 fd。 ---- */
+static void dbg(const char *fmt, ...);
 typedef struct { FILE *f; long size; } wasset_t;
 static const char *g_asset_roots[] = {
     "assets/", "runtime/assets/", ".deps/wechat-ime/assets/",
@@ -243,25 +253,35 @@ void *AAssetManager_fromJava(void *env, void *am) {
 void *AAssetManager_open(void *mgr, const char *path, long mode) {
     (void)mgr; (void)mode;
     char full[600];
-    for (unsigned i = 0; i < sizeof(g_asset_roots)/sizeof(g_asset_roots[0]); i++) {
-        snprintf(full, sizeof full, "%s%s", g_asset_roots[i], path);
-        FILE *f = fopen(full, "rb");
-        if (!f) continue;
-        fseek(f, 0, SEEK_END);
-        long size = ftell(f);
-        fseek(f, 0, SEEK_SET);
-        wasset_t *a = malloc(sizeof(wasset_t));
-        a->f = f; a->size = size;
-        return a;
+    int dbg_on = 0;
+    { static int d = -1; if (d < 0) { const char *e = getenv("WETYPE_ASSET_DBG"); d = e && *e ? 1 : 0; } dbg_on = d; }
+    FILE *f = NULL;
+    /* 引擎常直接传绝对路径（DictInfo.path / sourcePath 推出的路径），先按原样打开 */
+    if (path && *path) {
+        f = fopen(path, "rb");
+        if (f) snprintf(full, sizeof full, "%s", path);
     }
-    return NULL;
+    for (unsigned i = 0; !f && i < sizeof(g_asset_roots)/sizeof(g_asset_roots[0]); i++) {
+        snprintf(full, sizeof full, "%s%s", g_asset_roots[i], path);
+        f = fopen(full, "rb");
+    }
+    if (!f) { if (dbg_on) dbg("[asset] MISS %s\n", path); return NULL; }
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    wasset_t *a = malloc(sizeof(wasset_t));
+    a->f = f; a->size = size;
+    if (dbg_on) dbg("[asset] open %s -> %s (size=%ld)\n", path, full, size);
+    return a;
 }
-long AAsset_openFileDescriptor(void *asset, int *fd, long *offset) {
+/* NDK 原型：int AAsset_openFileDescriptor(AAsset*, off_t *outStart, off_t *outLength)
+   —— 文件描述符由**返回值**给出，两个出参是起始偏移与长度。 */
+int AAsset_openFileDescriptor(void *asset, long *outStart, long *outLength) {
     wasset_t *a = asset;
     if (!a || !a->f) return -1;
-    *fd = dup(fileno(a->f));
-    *offset = 0;
-    return 0;
+    if (outStart) *outStart = 0;
+    if (outLength) *outLength = a->size;
+    return dup(fileno(a->f));
 }
 void AAsset_close(void *asset) {
     wasset_t *a = asset;
@@ -307,6 +327,29 @@ char *__strncpy_chk2(char *dst, const char *src, size_t n,
 void __FD_SET_chk(int fd, fd_set *set, size_t sz) { (void)sz; FD_SET(fd, set); }
 void __FD_CLR_chk(int fd, fd_set *set, size_t sz) { (void)sz; FD_CLR(fd, set); }
 int  __FD_ISSET_chk(int fd, fd_set *set, size_t sz) { (void)sz; return FD_ISSET(fd, set); }
+
+
+/* ---- glibc 版本补缺：stat/lstat/fstat 直到 glibc 2.33 才有独立导出符号，
+   gettid 到 glibc 2.30。本机 glibc 2.28 只有 __xstat/__lxstat/__fxstat，
+   引擎闭包引用这些名字会 dlopen 失败（undefined symbol）。
+   aarch64 上内核 struct stat 与 bionic/glibc 布局完全一致，故直接走 syscall。 ---- */
+#include <sys/stat.h>
+#include <fcntl.h>
+
+int stat(const char *path, struct stat *buf) {
+    return (int)syscall(SYS_newfstatat, AT_FDCWD, path, buf, 0);
+}
+int lstat(const char *path, struct stat *buf) {
+    return (int)syscall(SYS_newfstatat, AT_FDCWD, path, buf, AT_SYMLINK_NOFOLLOW);
+}
+int fstat(int fd, struct stat *buf) {
+    return (int)syscall(SYS_fstat, fd, buf);
+}
+/* aarch64 LP64：*64 与普通版本布局相同，仅补符号名 */
+int stat64(const char *path, struct stat64 *buf)  { return stat(path, (struct stat *)buf); }
+int lstat64(const char *path, struct stat64 *buf) { return lstat(path, (struct stat *)buf); }
+int fstat64(int fd, struct stat64 *buf)           { return fstat(fd, (struct stat *)buf); }
+pid_t gettid(void) { return (pid_t)syscall(SYS_gettid); }
 
 
 /* ============ mmap 区间登记：free(mmap指针) → munmap ============ */
@@ -498,20 +541,22 @@ static void (*g_libc_free_body)(void *) = 0;  /* 惰性取 libc free 体（避�
 static void shim_free_impl(void *p) {
     if (!p) return;
     if (mm_contains(p)) return;   /* arena/mmap 内部指针：引擎自治，忽略 */
-    {   /* 默认：基线透传（与引擎在 bionic 上一致）；WETYPE_REG_FREE=1 才启用登记表 */
+    {   /* 基线透传（与引擎在 bionic 上一致）；libc 过旧时默认走登记表 */
         const char *e = getenv("WETYPE_REG_FREE");
-        if (!e || strcmp(e, "1")) {
+        int reg_free = (e && *e) ? !strcmp(e, "1") : WSF_REG_FREE_DEFAULT;
+        if (!reg_free) {
             if (!g_libc_free_body) {
                 void *fp = dlsym(RTLD_NEXT, "free");
                 if (!fp) fp = dlsym(RTLD_DEFAULT, "free");
-                if (!fp) fp = (void *)0x400000A96BA0;
-                {
+                if (!fp) fp = dlsym(RTLD_DEFAULT, "__libc_free");
+                if (fp) {
                     unsigned int insn = *(volatile unsigned int *)fp;
                     if ((insn & 0xFC000000u) == 0x14000000u) fp = (char *)fp + 4;
                 }
                 g_libc_free_body = (void (*)(void *))fp;
                 dbg("[freebody] dlsym=%p -> %p\n", fp, (void *)g_libc_free_body);
             }
+            if (!g_libc_free_body) return;   /* 解析不到 libc free：宁可泄漏也不破坏堆 */
             g_libc_free_body(p);
             return;
         }
@@ -519,13 +564,14 @@ static void shim_free_impl(void *p) {
     if (!g_libc_free_body) {
         void *fp = dlsym(RTLD_NEXT, "free");
         if (!fp) fp = dlsym(RTLD_DEFAULT, "free");
-        if (!fp) fp = (void *)0x400000A96BA0;
-        {   /* 若入口已被跳板 b 指令覆盖（0x14 高位），则 +4 取原始函数体 */
+        if (!fp) fp = dlsym(RTLD_DEFAULT, "__libc_free");
+        if (fp) {   /* 若入口已被跳板 b 指令覆盖（0x14 高位），则 +4 取原始函数体 */
             unsigned int insn = *(volatile unsigned int *)fp;
             if ((insn & 0xFC000000u) == 0x14000000u) fp = (char *)fp + 4;
         }
         g_libc_free_body = (void (*)(void *))fp;
     }
+    if (!g_libc_free_body) return;   /* 解析不到 libc free：宁可泄漏也不破坏堆 */
     if (!g_in_free) {
         g_in_free = 1;
         if (reg_take(p, 0)) { g_libc_free_body(p); g_in_free = 0; return; }   /* 自己分配的：真释放 */

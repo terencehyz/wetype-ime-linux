@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Benchmark WeType candidate response time for 1..N pinyin characters.
 
-Talks to the ARM64 harness daemon through QEMU user mode directly (no Fcitx,
+Talks to the ARM64 harness daemon directly (no Fcitx,
 no D-Bus), using the same line protocol as the addon:
   B <keys>  -> CAND\t... | EMPTY
   C         -> OK   (reset composition by recreating the session)
@@ -51,7 +51,7 @@ class Daemon:
             "WETYPE_WORK_DIR": work_dir,
             "WETYPE_HARNESS_LOG": str(log_path),
         })
-        command = [args.qemu, "-L", args.sysroot, str(args.harness),
+        command = [str(args.harness),
                    str(args.engine_dir / "lib/libwxhld_jni.so"), "--daemon"]
         self.timeout = args.timeout
         self.stderr_file = open(log_path, "a", encoding="utf-8")
@@ -215,8 +215,6 @@ def main() -> int:
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--engine-dir", type=Path, default=Path("/usr/lib/wetype-ime/arm64"))
     parser.add_argument("--harness", type=Path, default=None)
-    parser.add_argument("--qemu", default="qemu-aarch64-static")
-    parser.add_argument("--sysroot", default="/usr/aarch64-linux-gnu")
     parser.add_argument("--min-length", type=int, default=1,
                         help="shortest length included in the summary")
     parser.add_argument("--max-length", type=int, default=60)

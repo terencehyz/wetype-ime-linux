@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """禁用后台 scan_signature 环境完整性与词库反篡改校验补丁。
 
-微信键盘引擎后台定时触发 scan_signature (0x21c0884)，在 Linux/QEMU 环境下
+微信键盘引擎后台定时触发 scan_signature (0x21c0884)，在 Linux 环境下
 词库校验失败后走向异常解引用分支，导致定期触发 SIGSEGV (signal 11)。
 本补丁在 scan_signature 入口写入 ret (0xd65f03c0)，直接提前返回，根治崩溃。
 """

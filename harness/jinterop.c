@@ -121,6 +121,10 @@ static void dump_order(void *env, void *cg, long it, int n, const char *tag) {
 static char *g_clsreg[2048]; static int g_clsrn;
 static const char *cls_name(void *jclass) {
     if (!jclass) return "?";
+    /* FindClass/GetObjectClass 返回的是登记表槽位 &g_clsreg[i]（.bss 低地址），
+       必须先按登记表解析，否则会被下面的"低地址=可疑 token"分支误判成 "?"。 */
+    for (int i = 0; i < g_clsrn; i++)
+        if (jclass == (void *)&g_clsreg[i]) return g_clsreg[i];
     if ((unsigned long)jclass < 0x100000000UL) {
         LOG("cls_name: suspicious token %p (caller lr=%p)\n", jclass, __builtin_return_address(0));
         return "?";

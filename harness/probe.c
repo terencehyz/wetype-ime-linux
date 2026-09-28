@@ -1,4 +1,4 @@
-/* probe: 在 qemu-aarch64 下 dlopen 引擎库，报告成功/失败与可选符号探测 */
+/* probe: 在 aarch64 下 dlopen 引擎库，报告成功/失败与可选符号探测 */
 #include <dlfcn.h>
 #include <stdio.h>
 #include <string.h>

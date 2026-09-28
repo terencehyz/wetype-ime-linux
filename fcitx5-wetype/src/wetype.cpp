@@ -43,11 +43,46 @@
 
 namespace fcitx {
 
-static constexpr int GRID_ROWS = 4;
-static constexpr int GRID_COLUMNS = 5;
-static constexpr int COMPACT_PAGE_SIZE = GRID_COLUMNS;
-static constexpr int PAGE_SIZE = GRID_ROWS * GRID_COLUMNS;
+static constexpr int PAGE_SIZE = 5;   // 一页候选数(一行); 数字键 1-5 直接选
 static constexpr uint64_t ENGINE_RESTART_DELAY_USEC = 200000;
+
+// 中文标点映射。对齐 fcitx5-chinese-addons 的 punc.mb.zh_CN 默认档 (取其首选值),
+// 其中 fcitx5 默认保持原样的 # $ % ` { } 也给了全角形式, 因为这里没有标点候选菜单。
+// key() 已由 fcitx5 按 XKB 归一化, Shift 组合键到这里已经是 < > ? : " 等符号本身。
+struct ChinesePunctuation {
+    const char *text;   // UTF-8 全角标点
+    const char *pair;   // 成对符号的收尾符号; 非成对为 nullptr
+};
+
+static ChinesePunctuation chinesePunctuation(KeySym sym) {
+    switch (sym) {
+    case FcitxKey_comma:        return {"，", nullptr};
+    case FcitxKey_period:       return {"。", nullptr};
+    case FcitxKey_question:     return {"？", nullptr};
+    case FcitxKey_exclam:       return {"！", nullptr};
+    case FcitxKey_colon:        return {"：", nullptr};
+    case FcitxKey_semicolon:    return {"；", nullptr};
+    case FcitxKey_less:         return {"《", nullptr};
+    case FcitxKey_greater:      return {"》", nullptr};
+    case FcitxKey_backslash:    return {"、", nullptr};
+    case FcitxKey_parenleft:    return {"（", nullptr};
+    case FcitxKey_parenright:   return {"）", nullptr};
+    case FcitxKey_bracketleft:  return {"【", nullptr};
+    case FcitxKey_bracketright: return {"】", nullptr};
+    case FcitxKey_braceleft:    return {"｛", nullptr};
+    case FcitxKey_braceright:   return {"｝", nullptr};
+    case FcitxKey_underscore:   return {"——", nullptr};
+    case FcitxKey_asciicircum:  return {"……", nullptr};
+    case FcitxKey_asciitilde:   return {"～", nullptr};
+    case FcitxKey_grave:        return {"·", nullptr};
+    case FcitxKey_numbersign:   return {"＃", nullptr};
+    case FcitxKey_dollar:       return {"￥", nullptr};
+    case FcitxKey_percent:      return {"％", nullptr};
+    case FcitxKey_quotedbl:     return {"“", "”"};
+    case FcitxKey_apostrophe:   return {"‘", "’"};
+    default:                    return {nullptr, nullptr};
+    }
+}
 
 // Display-only segmentation. The original unsegmented buffer is still sent to
 // the WeType engine, so this never changes composition or candidate matching.
@@ -119,8 +154,10 @@ static Text pinyinPreedit(const std::string &buffer) {
     return text;
 }
 
-struct GridColumnCandidate : public CandidateWord {
-    GridColumnCandidate(Text text, std::function<void(InputContext *)> select)
+// One page candidate. Every visible word is its own CandidateWord so the UI can
+// map a mouse click (or the numbered label) to exactly that word.
+struct PageCandidate : public CandidateWord {
+    PageCandidate(Text text, std::function<void(InputContext *)> select)
         : CandidateWord(std::move(text)), select_(std::move(select)) {
         setCustomLabel(Text(""));
     }
@@ -134,8 +171,7 @@ private:
 #define WLOG(...) do { fprintf(stderr, "[wetype-addon] " __VA_ARGS__); fflush(stderr); } while (0)
 
 // ---------------------------------------------------------------- 引擎目录解析
-static void resolveDirs(std::string &eng, std::string &dicts, std::string &work,
-                        std::string &qemu, std::string &sysroot) {
+static void resolveDirs(std::string &eng, std::string &dicts, std::string &work) {
     auto existsEngine = [](const std::string &p) {
         return ::access((p + "/wetype-harness").c_str(), X_OK) == 0 &&
                ::access((p + "/lib/libwxhld_jni.so").c_str(), R_OK) == 0;
@@ -152,15 +188,6 @@ static void resolveDirs(std::string &eng, std::string &dicts, std::string &work,
         }
     }
     dicts = getenv("WETYPE_DICT_DIR") ? getenv("WETYPE_DICT_DIR") : eng + "/dicts";
-    // QEMU 与 ARM64 glibc 随安装一起提供；缺失时回落到系统包
-    qemu = getenv("QEMU_AARCH64") ? getenv("QEMU_AARCH64") : "";
-    if (qemu.empty())
-        qemu = ::access((eng + "/qemu-aarch64-static").c_str(), X_OK) == 0
-                   ? eng + "/qemu-aarch64-static" : "qemu-aarch64-static";
-    sysroot = getenv("WETYPE_SYSROOT") ? getenv("WETYPE_SYSROOT") : "";
-    if (sysroot.empty())
-        sysroot = ::access((eng + "/sysroot/lib/ld-linux-aarch64.so.1").c_str(), R_OK) == 0
-                      ? eng + "/sysroot" : "/usr/aarch64-linux-gnu";
     const char *xdg = getenv("XDG_DATA_HOME");
     std::string base = xdg && *xdg ? xdg : std::string(home) + "/.local/share";
     work = getenv("WETYPE_WORK_DIR") ? getenv("WETYPE_WORK_DIR") : base + "/wetype-ime/dict";
@@ -187,8 +214,8 @@ public:
             if (!gaveUp_) { WLOG("engine gave up after %d failures\n", failCount_); gaveUp_ = true; }
             return false;
         }
-        std::string eng, dicts, work, qemu, sysroot;
-        resolveDirs(eng, dicts, work, qemu, sysroot);
+        std::string eng, dicts, work;
+        resolveDirs(eng, dicts, work);
 
         int inP[2], outP[2];
         if (pipe2(inP, O_CLOEXEC) < 0) return false;
@@ -203,8 +230,7 @@ public:
             return false;
         }
         if (p == 0) {
-            // QEMU user mode writes guest core files in its current directory.
-            // Keep an engine crash from leaving qemu_wetype-harness_*.core in HOME.
+            // Bound core dumps so an engine crash cannot fill HOME with core files.
             const struct rlimit noCore = {0, 0};
             if (setrlimit(RLIMIT_CORE, &noCore) < 0) _exit(127);
             dup2(inP[0], 0);
@@ -222,9 +248,9 @@ public:
             setenv("WETYPE_DICT_DIR", dicts.c_str(), 1);
             setenv("WETYPE_ASSET_DIR", dicts.c_str(), 1);
             setenv("WETYPE_WORK_DIR", work.c_str(), 1);
-            execlp(qemu.c_str(), qemu.c_str(), "-L", sysroot.c_str(),
-                   (eng + "/wetype-harness").c_str(),
-                   (eng + "/lib/libwxhld_jni.so").c_str(), "--daemon", (char *)nullptr);
+            execl((eng + "/wetype-harness").c_str(),
+                  (eng + "/wetype-harness").c_str(),
+                  (eng + "/lib/libwxhld_jni.so").c_str(), "--daemon", (char *)nullptr);
             _exit(127);
         }
         close(inP[0]);
@@ -256,7 +282,7 @@ public:
             int st = 0;
             bool exited = false;
             // Let the harness process Q, destroy its engine session and flush
-            // learned words. Bound shutdown so a wedged QEMU cannot stall Fcitx.
+            // learned words. Bound shutdown so a wedged engine cannot stall Fcitx.
             for (int i = 0; i < 100; ++i) {
                 pid_t result = waitpid(pid_, &st, WNOHANG);
                 if (result == pid_ || (result < 0 && errno == ECHILD)) {
@@ -383,8 +409,8 @@ public:
     explicit WeTypeEngine(Instance *instance)
         : instance_(instance), eng_(instance->eventLoop()) {
         signal(SIGPIPE, SIG_IGN);
-        std::string eng, dicts, work, qemu, sysroot;
-        resolveDirs(eng, dicts, work, qemu, sysroot);
+        std::string eng, dicts, work;
+        resolveDirs(eng, dicts, work);
         WLOG("async addon init: eng=%s\n", eng.c_str());
         // Start eagerly so the first key never waits for the ~1.5 s engine
         // startup, and bring the engine back as soon as it exits.
@@ -409,8 +435,8 @@ public:
         candidatesCurrent_ = false;
         windowStart_ = 0;
         selected_ = 0;
-        expandedGrid_ = false;
         recoveryTried_ = false;
+        pairedOpen_.clear();
         eng_.send("SAVE", nullptr);
         eng_.send("C", nullptr);
         if (had) updateUI(*ic);
@@ -435,8 +461,8 @@ public:
         candidatesCurrent_ = false;
         windowStart_ = 0;
         selected_ = 0;
-        expandedGrid_ = false;
         recoveryTried_ = false;
+        pairedOpen_.clear();
         eng_.send("C", nullptr);
         if (had) updateUI(*ic);
     }
@@ -447,63 +473,45 @@ private:
         panel.reset();
         panel.setPreedit(pinyinPreedit(buf_));
         if (!cands_.empty()) {
-            if (windowStart_ >= static_cast<int>(cands_.size())) {
+            if (windowStart_ < 0 || windowStart_ >= static_cast<int>(cands_.size())) {
                 windowStart_ = 0;
                 selected_ = 0;
             }
-        }
-        if (!cands_.empty()) {
             const int start = windowStart_;
-            const int visiblePageSize = expandedGrid_ ? PAGE_SIZE : COMPACT_PAGE_SIZE;
-            const int end = std::min<int>(start + visiblePageSize, cands_.size());
+            const int end = std::min<int>(start + PAGE_SIZE, cands_.size());
             const int pageCount = end - start;
             if (selected_ < start || selected_ >= end) selected_ = start;
             auto cl = std::make_unique<CommonCandidateList>();
             cl->setLayoutHint(CandidateLayoutHint::Horizontal);
-            if (!expandedGrid_) {
-                cl->setPageSize(pageCount);
-                for (int index = start; index < end; ++index) {
-                    Text candidate;
-                    candidate.append(std::to_string(index - start + 1) + " ");
-                    candidate.append(cands_[index]);
-                    cl->append<GridColumnCandidate>(std::move(candidate),
-                        [this, index](InputContext *context) {
-                            commitCandidate(context, index);
-                        });
-                }
-                // The API validates this index immediately against the list
-                // size, so set it only after all compact candidates exist.
-                cl->setGlobalCursorIndex(selected_ - start);
-            } else {
-                cl->setPageSize(GRID_COLUMNS);
-                cl->setLabels(std::vector<std::string>(GRID_COLUMNS, ""));
-                cl->setGlobalCursorIndex(-1);
-                for (int col = 0; col < GRID_COLUMNS; ++col) {
-                    Text column;
-                    for (int row = 0; row < GRID_ROWS; ++row) {
-                        const int index = start + row * GRID_COLUMNS + col;
-                        if (index < end) {
-                            const bool selected = index == selected_;
-                            const auto label = std::to_string(index - start + 1) + " ";
-                            const auto flag = selected ? TextFormatFlag::HighLight
-                                                       : TextFormatFlag::NoFlag;
-                            column.append(label, flag);
-                            column.append(cands_[index], flag);
-                        } else {
-                            column.append(" ");
-                        }
-                        if (row + 1 < GRID_ROWS) column.append("\n");
-                    }
-                    const int selectedIndex = selected_;
-                    cl->append<GridColumnCandidate>(std::move(column),
-                        [this, selectedIndex](InputContext *context) {
-                            commitCandidate(context, selectedIndex);
-                        });
-                }
+            cl->setPageSize(pageCount);
+            for (int index = start; index < end; ++index) {
+                Text candidate;
+                candidate.append(std::to_string(index - start + 1) + " ");
+                candidate.append(cands_[index]);
+                cl->append<PageCandidate>(std::move(candidate),
+                    [this, index](InputContext *context) {
+                        commitCandidate(context, index);
+                    });
             }
+            // The API validates this index immediately against the list
+            // size, so set it only after all page candidates exist.
+            cl->setGlobalCursorIndex(selected_ - start);
             panel.setCandidateList(std::move(cl));
         }
         ic.updateUserInterface(UserInterfaceComponent::InputPanel);
+    }
+
+    // 成对标点 (引号) 开/闭切换: 未配对时给开符号并记入栈, 已配对时给收符号。
+    std::string selectPunctuation(KeySym sym, const ChinesePunctuation &punct) {
+        if (!punct.pair) return punct.text;
+        const int key = static_cast<int>(sym);
+        auto it = pairedOpen_.find(key);
+        if (it != pairedOpen_.end()) {
+            pairedOpen_.erase(it);
+            return punct.pair;
+        }
+        pairedOpen_.insert(key);
+        return punct.text;
     }
 
     void commitText(InputContext *ic, const std::string &text) {
@@ -517,7 +525,6 @@ private:
         candidatesCurrent_ = false;
         windowStart_ = 0;
         selected_ = 0;
-        expandedGrid_ = false;
         recoveryTried_ = false;
         eng_.send("C", nullptr);          // 重建会话
         updateUI(*ic);
@@ -544,7 +551,6 @@ private:
         candidatesCurrent_ = false;
         windowStart_ = 0;
         selected_ = 0;
-        expandedGrid_ = false;
         eng_.send("S " + std::to_string(index), candidateHandler());
         updateUI(*ic);
     }
@@ -666,9 +672,9 @@ private:
     bool candidatesCurrent_ = false;
     int windowStart_ = 0;
     int selected_ = 0;
-    bool expandedGrid_ = false;
     bool recoveryTried_ = false;
     uint64_t revision_ = 0;
+    std::unordered_set<int> pairedOpen_;   // 待闭合的成对标点 (引号)
     TrackableObjectReference<InputContext> icRef_;
 
     void clearAll(InputContext *ic = nullptr) {
@@ -679,8 +685,8 @@ private:
         candidatesCurrent_ = false;
         windowStart_ = 0;
         selected_ = 0;
-        expandedGrid_ = false;
         recoveryTried_ = false;
+        pairedOpen_.clear();
         eng_.send("C", nullptr);
         if (ic) updateUI(*ic);
     }
@@ -723,51 +729,40 @@ void WeTypeEngine::keyEvent(const InputMethodEntry &, KeyEvent &event) {
             updateUI(*ic);
             requestCandidates(replayBuffer ? buf_ : std::string(1, c));
         }
-        // The compact single row expands to the four-row grid on Down.
+        // 左右移动选择, 到本页两端则翻页; 上下翻页。
         else if (!buf_.empty() && candidatesCurrent_ && !cands_.empty() &&
                  (sym == FcitxKey_Left || sym == FcitxKey_Right ||
                   sym == FcitxKey_Up || sym == FcitxKey_Down)) {
-            if (!expandedGrid_) {
-                if (sym == FcitxKey_Down) {
-                    expandedGrid_ = true;
-                } else if (sym == FcitxKey_Left && selected_ > windowStart_) {
+            const int size = static_cast<int>(cands_.size());
+            if (sym == FcitxKey_Left) {
+                if (selected_ > windowStart_) {
                     --selected_;
-                } else if (sym == FcitxKey_Right &&
-                           selected_ + 1 < std::min<int>(windowStart_ + COMPACT_PAGE_SIZE,
-                                                       cands_.size())) {
+                } else if (windowStart_ > 0) {
+                    windowStart_ = std::max(0, windowStart_ - PAGE_SIZE);
+                    selected_ = std::min<int>(windowStart_ + PAGE_SIZE, size) - 1;
+                }
+            } else if (sym == FcitxKey_Right) {
+                if (selected_ + 1 < std::min<int>(windowStart_ + PAGE_SIZE, size)) {
                     ++selected_;
+                } else if (windowStart_ + PAGE_SIZE < size) {
+                    windowStart_ += PAGE_SIZE;
+                    selected_ = windowStart_;
                 }
-                updateUI(*ic);
-                handled = true;
-            } else {
-            const int start = windowStart_;
-            const int count = std::min<int>(PAGE_SIZE,
-                static_cast<int>(cands_.size()) - start);
-            const int row = (selected_ - start) / GRID_COLUMNS;
-            const int col = (selected_ - start) % GRID_COLUMNS;
-            int next = selected_;
-            if (sym == FcitxKey_Left && col > 0) next--;
-            if (sym == FcitxKey_Right && col + 1 < GRID_COLUMNS && next + 1 < start + count) next++;
-            if (sym == FcitxKey_Up) {
-                if (row > 0) next -= GRID_COLUMNS;
-                else if (start >= GRID_COLUMNS) {
-                    windowStart_ -= GRID_COLUMNS;
-                    next -= GRID_COLUMNS;
+            } else if (sym == FcitxKey_Up) {
+                if (windowStart_ > 0) {
+                    windowStart_ = std::max(0, windowStart_ - PAGE_SIZE);
+                    selected_ = windowStart_;
+                }
+            } else if (sym == FcitxKey_Down) {
+                if (windowStart_ + PAGE_SIZE < size) {
+                    windowStart_ += PAGE_SIZE;
+                    selected_ = windowStart_;
                 }
             }
-            if (sym == FcitxKey_Down) {
-                if (next + GRID_COLUMNS < start + count) next += GRID_COLUMNS;
-                else if (next + GRID_COLUMNS < static_cast<int>(cands_.size())) {
-                    windowStart_ += GRID_COLUMNS;
-                    next += GRID_COLUMNS;
-                }
-            }
-            selected_ = next;
             updateUI(*ic);
             handled = true;
-            }
         }
-        // - / = / PgUp / PgDn : move between four-row candidate grids.
+        // - / = / PgUp / PgDn : 翻上一页/下一页
         else if (sym == FcitxKey_minus || sym == FcitxKey_Page_Up) {
             if (!buf_.empty() && windowStart_ > 0) {
                 windowStart_ = std::max(0, windowStart_ - PAGE_SIZE);
@@ -778,28 +773,23 @@ void WeTypeEngine::keyEvent(const InputMethodEntry &, KeyEvent &event) {
         }
         else if (sym == FcitxKey_equal || sym == FcitxKey_plus ||
                  sym == FcitxKey_KP_Add || sym == FcitxKey_Page_Down) {
-            if (!buf_.empty() && candidatesCurrent_ && !cands_.empty() && !expandedGrid_) {
-                expandedGrid_ = true;
-                updateUI(*ic);
-                handled = true;
-            } else if (!buf_.empty() && expandedGrid_ &&
-                       candidatesCurrent_ && windowStart_ + PAGE_SIZE < (int)cands_.size()) {
-                windowStart_ = std::min(windowStart_ + PAGE_SIZE,
-                    ((static_cast<int>(cands_.size()) - 1) / GRID_COLUMNS) * GRID_COLUMNS);
+            if (!buf_.empty() && candidatesCurrent_ && !cands_.empty() &&
+                windowStart_ + PAGE_SIZE < static_cast<int>(cands_.size())) {
+                windowStart_ += PAGE_SIZE;
                 selected_ = windowStart_;
                 updateUI(*ic);
                 handled = true;
             }
         }
-        // 逗号/句号: 组词中=首选顶字+标点; 空态透传
-        else if (sym == FcitxKey_comma || sym == FcitxKey_period) {
+        // 中文标点: 组词中=首选顶字+标点; 空态=直接上屏全角标点
+        else if (auto punct = chinesePunctuation(sym); punct.text) {
+            const std::string converted = selectPunctuation(sym, punct);
             if (!buf_.empty()) {
-                std::string punct = (sym == FcitxKey_comma) ? "," : ".";
                 std::string text = !candidatesCurrent_ || cands_.empty() ? buf_ : cands_[selected_];
                 if (candidatesCurrent_ && !cands_.empty())
                     eng_.send("S " + std::to_string(selected_), nullptr);
-                WLOG("commit with punctuation text_len=%zu\n", text.size() + punct.size());
-                ic->commitString(text + punct);
+                WLOG("commit with punctuation text_len=%zu\n", text.size() + converted.size());
+                ic->commitString(text + converted);
                 ++revision_;
                 buf_.clear();
                 cands_.clear();
@@ -807,18 +797,19 @@ void WeTypeEngine::keyEvent(const InputMethodEntry &, KeyEvent &event) {
                 candidatesCurrent_ = false;
                 windowStart_ = 0;
                 selected_ = 0;
-                expandedGrid_ = false;
                 eng_.send("C", nullptr);
                 updateUI(*ic);
-                handled = true;
+            } else {
+                WLOG("commit punctuation len=%zu\n", converted.size());
+                ic->commitString(converted);
             }
+            handled = true;
         }
-        // 数字选词(全局序号 = 页首 + 数字)
+        // 数字选词(本页序号 1-5)
         else if (sym >= FcitxKey_1 && sym <= FcitxKey_9) {
             int ordinal = static_cast<int>(sym - FcitxKey_1);
-            int visibleCount = expandedGrid_ ? PAGE_SIZE : COMPACT_PAGE_SIZE;
             int idx = windowStart_ + ordinal;
-            if (ordinal < visibleCount && candidatesCurrent_ && !cands_.empty() && idx < (int)cands_.size()) {
+            if (ordinal < PAGE_SIZE && candidatesCurrent_ && !cands_.empty() && idx < (int)cands_.size()) {
                 commitCandidate(ic, idx);
                 handled = true;
             }
@@ -853,7 +844,6 @@ void WeTypeEngine::keyEvent(const InputMethodEntry &, KeyEvent &event) {
                     candidatesCurrent_ = false;
                     windowStart_ = 0;
                     selected_ = 0;
-                    expandedGrid_ = false;
                     updateUI(*ic);
                 } else {
                     requestCandidates(buf_);
@@ -871,7 +861,6 @@ void WeTypeEngine::keyEvent(const InputMethodEntry &, KeyEvent &event) {
                 candidatesCurrent_ = false;
                 windowStart_ = 0;
                 selected_ = 0;
-                expandedGrid_ = false;
                 eng_.send("C", nullptr);
                 updateUI(*ic);
                 handled = true;

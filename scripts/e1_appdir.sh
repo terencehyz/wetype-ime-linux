@@ -1,9 +1,9 @@
 #!/bin/bash
 # e1_appdir.sh — 组装 WeType 输入法 AppDir（对齐 doubao-ime-linux b1 布局）
 # AppDir 只含本项目自己的代码（Paper 式）：不含任何 APK 里的库或词库。
+# 本机构建为原生 aarch64，app 内直接运行 ARM64 harness，不需要 QEMU/sysroot。
 # 结构:
 #   AppDir/usr/lib/wetype-ime/arm64/{lib/{libwetype-shim.so,libz.so.1},wetype-harness,wetype-ime-demo.sh}
-#   AppDir/usr/lib/wetype-ime/arm64/{qemu-aarch64-static,sysroot/lib/}  QEMU + ARM64 glibc（第三方，可再分发）
 #   AppDir/usr/lib/wetype-ime/scripts/  安装时下载官方 APK、校验 SHA-256 并在本机打补丁
 #   AppDir/usr/bin/{wetype-ime-engine,wetype-demo}
 #   AppDir/usr/lib/fcitx5/libfcitx5-wetype.so
@@ -36,33 +36,22 @@ cp "$BASE/harness/jinterop" "$ENG/wetype-harness"
 cp "$BASE/src/wetype-ime-demo.sh" "$ENG/"
 chmod +x "$ENG/wetype-ime-demo.sh"
 
-# 1b. 第三方运行时：静态 QEMU user 模式 + 最小 ARM64 glibc（均可再分发，见 THIRD-PARTY）
-QEMU_BIN="${QEMU_AARCH64:-$(command -v qemu-aarch64-static || true)}"
-SYSROOT_SRC="${WETYPE_SYSROOT:-/usr/aarch64-linux-gnu}"
-[ -n "$QEMU_BIN" ] && [ -x "$QEMU_BIN" ] || { echo "Missing qemu-aarch64-static (qemu-user-static)" >&2; exit 1; }
-file -L "$QEMU_BIN" | grep -q 'static' || { echo "$QEMU_BIN is not statically linked" >&2; exit 1; }
-cp -L "$QEMU_BIN" "$ENG/qemu-aarch64-static"
-mkdir -p "$ENG/sysroot/lib"
-for so in ld-linux-aarch64.so.1 libc.so.6 libm.so.6 libdl.so.2 libpthread.so.0; do
-  [ -f "$SYSROOT_SRC/lib/$so" ] || { echo "Missing ARM64 glibc: $SYSROOT_SRC/lib/$so (libc6-arm64-cross)" >&2; exit 1; }
-  cp -L "$SYSROOT_SRC/lib/$so" "$ENG/sysroot/lib/"
-done
+# 第三方运行时：仅 zlib（原生 aarch64 直接运行，不需要 QEMU/独立 glibc sysroot）
 pkg_version() { dpkg-query -W -f '${Version}' "$1" 2>/dev/null || echo unknown; }
 mkdir -p "$APPDIR/usr/share/doc/wetype-ime"
 cat > "$APPDIR/usr/share/doc/wetype-ime/THIRD-PARTY.md" <<NOTICE
 # Third-party components bundled in this AppImage
 
-| Component | Files | License | Version (Debian/Ubuntu package) |
+| Component | Files | License | Version (distribution package) |
 |---|---|---|---|
-| QEMU user mode | usr/lib/wetype-ime/arm64/qemu-aarch64-static | GPL-2.0 | qemu-user-static $(pkg_version qemu-user-static) |
-| GNU C Library (ARM64) | usr/lib/wetype-ime/arm64/sysroot/lib/* | LGPL-2.1-or-later | libc6-arm64-cross $(pkg_version libc6-arm64-cross) |
-| zlib (ARM64) | usr/lib/wetype-ime/arm64/lib/libz.so.1 | Zlib | zlib1g:arm64 $(pkg_version zlib1g:arm64) |
+| zlib (aarch64) | usr/lib/wetype-ime/arm64/lib/libz.so.1 | Zlib | zlib1g $(pkg_version zlib1g) |
 
-These binaries are unmodified copies from the build host's distribution packages.
+This binary is an unmodified copy from the build host's distribution package.
 Corresponding source code is available from the distribution's source archive
-(for Ubuntu: \`apt-get source qemu cross-toolchain-base zlib\` with the versions above,
-or https://launchpad.net/ubuntu/+source/qemu, /cross-toolchain-base, /zlib), and from
-https://www.qemu.org, https://www.gnu.org/software/libc and https://zlib.net.
+(for Debian/Ubuntu: \`apt-get source zlib\`) and from https://zlib.net.
+
+This build targets a native aarch64 host and runs the engine directly; it does not
+bundle QEMU or a separate ARM64 glibc sysroot.
 
 WeType (微信输入法) itself is NOT included: its libraries and dictionaries are downloaded
 from Tencent's server and patched on the user's machine at install time.
@@ -81,13 +70,11 @@ ENG="\$(dirname "\$(readlink -f "\$0")")/../lib/wetype-ime/arm64"
 ulimit -c 0
 USRDATA="\${XDG_DATA_HOME:-\$HOME/.local/share}/wetype-ime"
 mkdir -p "\$USRDATA/dict/userdict/v5" "\$USRDATA/dict/userdict/user_hot_word"
-QEMU="\${QEMU_AARCH64:-\$ENG/qemu-aarch64-static}"
 exec env LD_LIBRARY_PATH="\$ENG/lib" \\
          WETYPE_LIB_DIR="\$ENG/lib" \\
          WETYPE_DICT_DIR="\$ENG/dicts" \\
          WETYPE_ASSET_DIR="\$ENG/dicts" \\
          WETYPE_WORK_DIR="\$USRDATA/dict" \\
-    "\$QEMU" -L "\${WETYPE_SYSROOT:-\$ENG/sysroot}" \\
     "\$ENG/wetype-harness" "\$ENG/lib/libwxhld_jni.so" --daemon
 EOF
 chmod +x "$APPDIR/usr/bin/wetype-ime-engine"
@@ -113,7 +100,7 @@ cat > "$APPDIR/usr/share/applications/wetype-ime.desktop" <<'EOF'
 [Desktop Entry]
 Type=Application
 Name=WeType IME Engine
-Comment=微信输入法引擎（候选词驱动, qemu-aarch64 桥）
+Comment=微信输入法引擎（候选词驱动, 原生 aarch64）
 Exec=wetype-demo nihao
 Icon=wetype-ime
 Categories=Utility;

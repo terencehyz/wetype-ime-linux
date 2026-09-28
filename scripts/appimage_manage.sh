@@ -118,7 +118,6 @@ if [ "$action" = install ]; then
   for required in \
     "$src_eng/wetype-harness" "$src_eng/wetype-ime-demo.sh" \
     "$src_eng/lib/libwetype-shim.so" "$src_eng/lib/libz.so.1" \
-    "$src_eng/qemu-aarch64-static" "$src_eng/sysroot/lib/ld-linux-aarch64.so.1" \
     "$src_scripts/prepare_assets.sh" "$src_scripts/10_patch_libs.sh" \
     "$src/lib/fcitx5/libfcitx5-wetype.so" \
     "$src/share/fcitx5/addon/wetype.conf" \
@@ -151,9 +150,6 @@ if [ "$action" = install ]; then
   done
   install -m 755 "$src_eng/wetype-harness" "$eng/wetype-harness"
   install -m 755 "$src_eng/wetype-ime-demo.sh" "$eng/wetype-ime-demo.sh"
-  install -m 755 "$src_eng/qemu-aarch64-static" "$eng/qemu-aarch64-static"
-  rm -rf "$eng/sysroot"
-  cp -a --no-preserve=ownership "$src_eng/sysroot" "$eng/sysroot"
   install -m 755 "$src/bin/wetype-ime-engine" "$prefix/bin/wetype-ime-engine"
   install -m 755 "$src/bin/wetype-demo" "$prefix/bin/wetype-demo"
   install -m 755 "$src/lib/fcitx5/libfcitx5-wetype.so" "$addon"
@@ -171,11 +167,10 @@ else
   echo "卸载清单 ($scope)，以下路径均在 AppImage 之外："
   for path in "$addon" "$addon_conf" "$im_conf" "$desktop" "$icon" \
     "$prefix/bin/wetype-ime-engine" "$prefix/bin/wetype-demo" \
-    "$eng/wetype-harness" "$eng/wetype-ime-demo.sh" "$eng/qemu-aarch64-static"; do
+    "$eng/wetype-harness" "$eng/wetype-ime-demo.sh"; do
     print_existing_paths 删除 "$path"
   done
   print_existing_paths 删除 "$eng/lib"
-  print_existing_paths 删除 "$eng/sysroot"
   print_existing_paths 保留词库 "$eng/dicts"
   print_existing_paths 保留APK缓存 "$apk_cache"
   if [ "$scope" = user ]; then
@@ -186,8 +181,8 @@ else
   fi
   rm -f "$addon" "$addon_conf" "$im_conf" "$desktop" "$icon" \
     "$prefix/bin/wetype-ime-engine" "$prefix/bin/wetype-demo" \
-    "$eng/wetype-harness" "$eng/wetype-ime-demo.sh" "$eng/qemu-aarch64-static"
-  rm -rf "$eng/lib" "$eng/sysroot"
+    "$eng/wetype-harness" "$eng/wetype-ime-demo.sh"
+  rm -rf "$eng/lib"
   echo "卸载完成 ($scope)。预置词库保留在：$eng/dicts"
   echo "用户学习数据未清理。请重启 Fcitx5。"
 fi
